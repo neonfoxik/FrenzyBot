@@ -47,20 +47,30 @@ def _read_schedule():
         # Новый формат (список постов)
         if isinstance(data, list):
             posts = []
-            for post in data:
+            for post_data in data:
                 # Пропускаем уже отправленные посты (старый формат)
-                if post.get("sent", False):
+                if post_data.get("sent", False):
                     continue
-                if isinstance(post.get("dispatch_at"), str):
-                    dispatch_at = datetime.fromisoformat(post["dispatch_at"])
-                    # Если время без timezone, считаем его UTC
-                    if dispatch_at.tzinfo is None:
-                        dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
-                    post["dispatch_at"] = dispatch_at
-                elif isinstance(post.get("dispatch_at"), datetime):
-                    # Если время без timezone, считаем его UTC
-                    if post["dispatch_at"].tzinfo is None:
-                        post["dispatch_at"] = post["dispatch_at"].replace(tzinfo=UTC_TZ)
+                
+                # Создаем новый словарь для поста, чтобы не модифицировать исходный
+                dispatch_at_str = post_data.get("dispatch_at")
+                if isinstance(dispatch_at_str, str):
+                    dispatch_at = datetime.fromisoformat(dispatch_at_str)
+                elif isinstance(dispatch_at_str, datetime):
+                    dispatch_at = dispatch_at_str
+                else:
+                    continue  # Пропускаем посты с некорректным форматом времени
+                
+                # Если время без timezone, считаем его UTC
+                if dispatch_at.tzinfo is None:
+                    dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
+                
+                # Создаем новый пост с правильным форматом
+                post = {
+                    "id": post_data.get("id", str(uuid.uuid4())),
+                    "dispatch_at": dispatch_at,
+                    "message_text": post_data.get("message_text", "Привет"),
+                }
                 posts.append(post)
             return posts
         return []

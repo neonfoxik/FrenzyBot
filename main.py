@@ -35,39 +35,57 @@ def _read_schedule():
         return []
     with open(SCHEDULE_FILE, "r", encoding="utf-8") as file:
         data = json.load(file)
-        # Поддержка старого формата (один пост)
+        # Поддержка старого формата (один пост) - автоматическая миграция
         if isinstance(data, dict) and "dispatch_at" in data:
             # Пропускаем уже отправленные посты старого формата
             if data.get("sent", False):
+                # Удаляем файл старого формата
+                os.remove(SCHEDULE_FILE)
                 return []
-            post = {
-                "id": str(uuid.uuid4()),
-                "dispatch_at": data["dispatch_at"],
-                "message_text": data.get("message_text", "Привет"),
-            }
-            dispatch_at = datetime.fromisoformat(post["dispatch_at"])
+            
+            # Мигрируем старый формат в новый
+            dispatch_at_str = data["dispatch_at"]
+            dispatch_at = datetime.fromisoformat(dispatch_at_str)
             # Если время без timezone, считаем его UTC
             if dispatch_at.tzinfo is None:
                 dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
-            post["dispatch_at"] = dispatch_at
+            
+            post = {
+                "id": str(uuid.uuid4()),
+                "dispatch_at": dispatch_at,
+                "message_text": data.get("message_text", "Привет"),
+            }
+            
+            # Сохраняем в новом формате
+            _write_schedule([post])
             return [post]
         # Новый формат (список постов)
         if isinstance(data, list):
             posts = []
-            for post in data:
+            for post_data in data:
                 # Пропускаем уже отправленные посты
-                if post.get("sent", False):
+                if post_data.get("sent", False):
                     continue
-                if isinstance(post.get("dispatch_at"), str):
-                    dispatch_at = datetime.fromisoformat(post["dispatch_at"])
-                    # Если время без timezone, считаем его UTC
-                    if dispatch_at.tzinfo is None:
-                        dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
-                    post["dispatch_at"] = dispatch_at
-                elif isinstance(post.get("dispatch_at"), datetime):
-                    # Если время без timezone, считаем его UTC
-                    if post["dispatch_at"].tzinfo is None:
-                        post["dispatch_at"] = post["dispatch_at"].replace(tzinfo=UTC_TZ)
+                
+                # Создаем новый словарь для поста, чтобы не модифицировать исходный
+                dispatch_at_str = post_data.get("dispatch_at")
+                if isinstance(dispatch_at_str, str):
+                    dispatch_at = datetime.fromisoformat(dispatch_at_str)
+                elif isinstance(dispatch_at_str, datetime):
+                    dispatch_at = dispatch_at_str
+                else:
+                    continue  # Пропускаем посты с некорректным форматом времени
+                
+                # Если время без timezone, считаем его UTC
+                if dispatch_at.tzinfo is None:
+                    dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
+                
+                # Создаем новый пост с правильным форматом
+                post = {
+                    "id": post_data.get("id", str(uuid.uuid4())),
+                    "dispatch_at": dispatch_at,
+                    "message_text": post_data.get("message_text", "Привет"),
+                }
                 posts.append(post)
             return posts
         return []
@@ -75,21 +93,47 @@ def _read_schedule():
 
 def _write_schedule(posts):
     """Записывает список запланированных постов в файл"""
+    # Убеждаемся, что posts - это список
+    if not isinstance(posts, list):
+        posts = []
+    
     if not posts:
         # Если постов нет, не создаём файл или удаляем существующий
         if os.path.exists(SCHEDULE_FILE):
             os.remove(SCHEDULE_FILE)
         return
     
+    # Создаем payload с правильной структурой
     payload = []
     for post in posts:
-        payload.append({
+        # Извлекаем dispatch_at
+        dispatch_at = post.get("dispatch_at")
+        if isinstance(dispatch_at, datetime):
+            dispatch_at_str = dispatch_at.isoformat()
+        elif isinstance(dispatch_at, str):
+            dispatch_at_str = dispatch_at
+        else:
+            continue  # Пропускаем посты с некорректным форматом
+        
+        # Создаем запись для сохранения
+        payload_item = {
             "id": post.get("id", str(uuid.uuid4())),
-            "dispatch_at": post["dispatch_at"].isoformat() if isinstance(post["dispatch_at"], datetime) else post["dispatch_at"],
+            "dispatch_at": dispatch_at_str,
             "message_text": post.get("message_text", "Привет"),
-        })
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as file:
+        }
+        payload.append(payload_item)
+    
+    # Записываем в файл (создаем временный файл для атомарности записи)
+    temp_file = SCHEDULE_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
+    
+    # Атомарно заменяем старый файл новым
+    if os.path.exists(temp_file):
+        if os.path.exists(SCHEDULE_FILE):
+            os.replace(temp_file, SCHEDULE_FILE)
+        else:
+            os.rename(temp_file, SCHEDULE_FILE)
 
 
 @bot.message_handler(commands=["schedule"])
@@ -128,19 +172,33 @@ def handle_schedule(message: types.Message):
 
     message_text = parts[2] if len(parts) > 2 else "Привет"
     
+    # Читаем существующие посты
     posts = _read_schedule()
+    
+    # Убеждаемся, что posts - это список
+    if not isinstance(posts, list):
+        posts = []
+    
+    # Создаем новый пост
     new_post = {
         "id": str(uuid.uuid4()),
         "dispatch_at": dispatch_at_utc,  # Сохраняем в UTC
         "message_text": message_text,
     }
+    
+    # Добавляем новый пост в список
     posts.append(new_post)
+    
+    # Сохраняем обновленный список
     _write_schedule(posts)
     
+    # Подтверждаем добавление
+    total_posts = len(posts)
     bot.reply_to(
         message, 
         f"Пост запланирован на {dispatch_at_msk.strftime('%Y-%m-%d %H:%M')} МСК.\n"
-        f"Текст: {message_text}"
+        f"Текст: {message_text}\n"
+        f"Всего запланировано постов: {total_posts}"
     )
 
 
