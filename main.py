@@ -88,28 +88,6 @@ def handle_schedule_status(message: types.Message):
         f"Пост запланирован на {schedule['dispatch_at'].strftime('%Y-%m-%d %H:%M')}, статус: {dispatched}.",
     )
 
-@bot.message_handler(
-    content_types=["text", "photo", "video", "document", "audio", "voice"]
-)
-def handle_any_message(message: types.Message):
-    if str(message.from_user.id) != ADMIN_ID:
-        return
-
-    # Проверяем, есть ли forward_from_chat
-    if message.forward_from_chat:
-        chat = message.forward_from_chat
-        chat_id = chat.id
-        chat_name = chat.title or chat.username or str(chat_id)
-        bot.reply_to(message, f"ID чата/канала '{chat_name}': {chat_id}")
-    else:
-        bot.reply_to(
-            message,
-            "⚠️ Не удалось определить ID канала.\n"
-            "Убедитесь, что:\n"
-            "1. Вы пересылаете сообщение из канала,\n"
-            "2. В канале включена опция «Sign messages» (Подпись сообщений)."
-        )
-
 @bot.chat_join_request_handler()
 def approve_join_request(message):
     bot.approve_chat_join_request(message.chat.id, message.from_user.id)
