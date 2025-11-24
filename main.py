@@ -103,6 +103,21 @@ def handle_chat_id(message: types.Message):
     )
 
 
+@bot.message_handler(
+    func=lambda message: message.forward_from_chat is not None
+    and str(message.from_user.id) == ADMIN_ID
+)
+def handle_forwarded_chat(message: types.Message):
+    chat = message.forward_from_chat
+    chat_id = chat.id
+    chat_name = chat.title or chat.username or chat_id
+    bot.reply_to(message, f"ID форварднутого чата '{chat_name}': {chat_id}")
+    bot.send_message(
+        ADMIN_ID_INT,
+        f"ID чата (через пересланное сообщение) '{chat_name}': {chat_id}",
+    )
+
+
 @bot.channel_post_handler(func=lambda message: message.text and "/chat_id" in message.text)
 def handle_channel_chat_id(message: types.Message):
     chat_id = message.chat.id
