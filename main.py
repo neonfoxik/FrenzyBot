@@ -119,4 +119,6 @@ def approve_join_request(message):
 
 
 if __name__ == "__main__":
-    bot.infinity_polling(allowed_updates=["chat_join_request", "message"])
+    bot.infinity_polling(
+        allowed_updates=["chat_join_request", "message", "channel_post"]
+    )
