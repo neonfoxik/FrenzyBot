@@ -16,6 +16,10 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения!")
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID не найден в переменных окружения!")
+try:
+    ADMIN_ID_INT = int(ADMIN_ID)
+except ValueError as exc:
+    raise ValueError("ADMIN_ID должен быть числом Telegram пользователя.") from exc
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -92,8 +96,11 @@ def handle_chat_id(message: types.Message):
         return
 
     chat_id = message.chat.id
-    print(f"[CHAT_ID] chat_id={chat_id}")
     bot.reply_to(message, f"ID текущего чата: {chat_id}")
+    bot.send_message(
+        ADMIN_ID_INT,
+        f"ID чата '{message.chat.title or message.chat.username or chat_id}': {chat_id}",
+    )
 
 
 @bot.chat_join_request_handler()
