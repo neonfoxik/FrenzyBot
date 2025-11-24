@@ -85,6 +85,17 @@ def handle_schedule_status(message: types.Message):
     )
 
 
+@bot.message_handler(commands=["chat_id"])
+def handle_chat_id(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "Эта команда доступна только администратору.")
+        return
+
+    chat_id = message.chat.id
+    print(f"[CHAT_ID] chat_id={chat_id}")
+    bot.reply_to(message, f"ID текущего чата: {chat_id}")
+
+
 @bot.chat_join_request_handler()
 def approve_join_request(message):
     bot.approve_chat_join_request(message.chat.id, message.from_user.id)
