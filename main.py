@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from datetime import datetime
 
 import telebot
@@ -25,18 +26,52 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 
 def _read_schedule():
+    """Читает список запланированных постов из файла"""
     if not os.path.exists(SCHEDULE_FILE):
-        return None
+        return []
     with open(SCHEDULE_FILE, "r", encoding="utf-8") as file:
         data = json.load(file)
-        if "dispatch_at" not in data:
-            return None
-        data["dispatch_at"] = datetime.fromisoformat(data["dispatch_at"])
-        return data
+        # Поддержка старого формата (один пост)
+        if isinstance(data, dict) and "dispatch_at" in data:
+            # Пропускаем уже отправленные посты старого формата
+            if data.get("sent", False):
+                return []
+            post = {
+                "id": str(uuid.uuid4()),
+                "dispatch_at": data["dispatch_at"],
+                "message_text": data.get("message_text", "Привет"),
+            }
+            post["dispatch_at"] = datetime.fromisoformat(post["dispatch_at"])
+            return [post]
+        # Новый формат (список постов)
+        if isinstance(data, list):
+            posts = []
+            for post in data:
+                # Пропускаем уже отправленные посты
+                if post.get("sent", False):
+                    continue
+                if isinstance(post.get("dispatch_at"), str):
+                    post["dispatch_at"] = datetime.fromisoformat(post["dispatch_at"])
+                posts.append(post)
+            return posts
+        return []
 
 
-def _write_schedule(dispatch_at: datetime):
-    payload = {"dispatch_at": dispatch_at.isoformat(), "sent": False}
+def _write_schedule(posts):
+    """Записывает список запланированных постов в файл"""
+    if not posts:
+        # Если постов нет, не создаём файл или удаляем существующий
+        if os.path.exists(SCHEDULE_FILE):
+            os.remove(SCHEDULE_FILE)
+        return
+    
+    payload = []
+    for post in posts:
+        payload.append({
+            "id": post.get("id", str(uuid.uuid4())),
+            "dispatch_at": post["dispatch_at"].isoformat() if isinstance(post["dispatch_at"], datetime) else post["dispatch_at"],
+            "message_text": post.get("message_text", "Привет"),
+        })
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
@@ -47,11 +82,13 @@ def handle_schedule(message: types.Message):
         bot.reply_to(message, "Эта команда доступна только администратору.")
         return
 
-    parts = message.text.split(maxsplit=1)
+    parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
         bot.reply_to(
             message,
-            "Формат: /schedule YYYY-MM-DD HH:MM\nНапример: /schedule 2025-11-24 18:30",
+            "Формат: /schedule YYYY-MM-DD HH:MM [текст сообщения]\n"
+            "Например: /schedule 2025-11-24 18:30 Привет всем!\n"
+            "Или: /schedule 2025-11-24 18:30",
         )
         return
 
@@ -65,9 +102,21 @@ def handle_schedule(message: types.Message):
         bot.reply_to(message, "Время должно быть в будущем.")
         return
 
-    _write_schedule(dispatch_at)
+    message_text = parts[2] if len(parts) > 2 else "Привет"
+    
+    posts = _read_schedule()
+    new_post = {
+        "id": str(uuid.uuid4()),
+        "dispatch_at": dispatch_at,
+        "message_text": message_text,
+    }
+    posts.append(new_post)
+    _write_schedule(posts)
+    
     bot.reply_to(
-        message, f"Пост запланирован на {dispatch_at.strftime('%Y-%m-%d %H:%M')}."
+        message, 
+        f"Пост запланирован на {dispatch_at.strftime('%Y-%m-%d %H:%M')}.\n"
+        f"Текст: {message_text}"
     )
 
 
@@ -77,16 +126,27 @@ def handle_schedule_status(message: types.Message):
         bot.reply_to(message, "Эта команда доступна только администратору.")
         return
 
-    schedule = _read_schedule()
-    if not schedule:
-        bot.reply_to(message, "Пост не запланирован.")
+    posts = _read_schedule()
+    if not posts:
+        bot.reply_to(message, "Нет запланированных постов.")
         return
 
-    dispatched = "отправлен" if schedule.get("sent") else "ожидает отправки"
-    bot.reply_to(
-        message,
-        f"Пост запланирован на {schedule['dispatch_at'].strftime('%Y-%m-%d %H:%M')}, статус: {dispatched}.",
-    )
+    if len(posts) == 1:
+        post = posts[0]
+        bot.reply_to(
+            message,
+            f"Пост запланирован на {post['dispatch_at'].strftime('%Y-%m-%d %H:%M')}.\n"
+            f"Текст: {post.get('message_text', 'Привет')}"
+        )
+    else:
+        text = f"Всего запланировано постов: {len(posts)}\n\n"
+        for i, post in enumerate(posts, 1):
+            dispatch_time = post['dispatch_at'].strftime('%Y-%m-%d %H:%M')
+            message_preview = post.get('message_text', 'Привет')[:30]
+            if len(post.get('message_text', 'Привет')) > 30:
+                message_preview += "..."
+            text += f"{i}. {dispatch_time} - ⏳ ожидает отправки\n   {message_preview}\n"
+        bot.reply_to(message, text)
 
 @bot.chat_join_request_handler()
 def approve_join_request(message):
