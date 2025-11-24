@@ -88,35 +88,27 @@ def handle_schedule_status(message: types.Message):
         f"Пост запланирован на {schedule['dispatch_at'].strftime('%Y-%m-%d %H:%M')}, статус: {dispatched}.",
     )
 
-
-FORWARDABLE_CONTENT_TYPES = [
-    "text",
-    "photo",
-    "video",
-    "animation",
-    "document",
-    "audio",
-    "voice",
-    "video_note",
-    "sticker",
-]
-
-
 @bot.message_handler(
-    func=lambda message: message.forward_from_chat is not None
-    and str(message.from_user.id) == ADMIN_ID,
-    content_types=FORWARDABLE_CONTENT_TYPES,
+    content_types=["text", "photo", "video", "document", "audio", "voice"]
 )
-def handle_forwarded_chat(message: types.Message):
-    chat = message.forward_from_chat
-    chat_id = chat.id
-    chat_name = chat.title or chat.username or chat_id
-    bot.reply_to(message, f"ID форварднутого чата '{chat_name}': {chat_id}")
-    bot.send_message(
-        ADMIN_ID_INT,
-        f"ID чата (через пересланное сообщение) '{chat_name}': {chat_id}",
-    )
+def handle_any_message(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
 
+    # Проверяем, есть ли forward_from_chat
+    if message.forward_from_chat:
+        chat = message.forward_from_chat
+        chat_id = chat.id
+        chat_name = chat.title or chat.username or str(chat_id)
+        bot.reply_to(message, f"ID чата/канала '{chat_name}': {chat_id}")
+    else:
+        bot.reply_to(
+            message,
+            "⚠️ Не удалось определить ID канала.\n"
+            "Убедитесь, что:\n"
+            "1. Вы пересылаете сообщение из канала,\n"
+            "2. В канале включена опция «Sign messages» (Подпись сообщений)."
+        )
 
 @bot.chat_join_request_handler()
 def approve_join_request(message):
