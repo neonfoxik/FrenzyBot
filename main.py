@@ -103,6 +103,16 @@ def handle_chat_id(message: types.Message):
     )
 
 
+@bot.channel_post_handler(func=lambda message: message.text and "/chat_id" in message.text)
+def handle_channel_chat_id(message: types.Message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, f"ID этого канала: {chat_id}")
+    bot.send_message(
+        ADMIN_ID_INT,
+        f"ID канала '{message.chat.title or message.chat.username or chat_id}': {chat_id}",
+    )
+
+
 @bot.chat_join_request_handler()
 def approve_join_request(message):
     bot.approve_chat_join_request(message.chat.id, message.from_user.id)
