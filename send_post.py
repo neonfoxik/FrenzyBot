@@ -1,10 +1,12 @@
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import telebot
 from dotenv import load_dotenv
+
+UTC_TZ = timezone.utc  # UTC
 
 load_dotenv()
 
@@ -28,20 +30,39 @@ def _read_schedule():
         data = json.load(file)
         # Поддержка старого формата (один пост)
         if isinstance(data, dict) and "dispatch_at" in data:
+            # Пропускаем уже отправленные посты старого формата
+            if data.get("sent", False):
+                return []
             post = {
                 "id": str(uuid.uuid4()),
                 "dispatch_at": data["dispatch_at"],
                 "message_text": data.get("message_text", "Привет"),
-                "sent": data.get("sent", False),
             }
-            post["dispatch_at"] = datetime.fromisoformat(post["dispatch_at"])
+            dispatch_at = datetime.fromisoformat(post["dispatch_at"])
+            # Если время без timezone, считаем его UTC
+            if dispatch_at.tzinfo is None:
+                dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
+            post["dispatch_at"] = dispatch_at
             return [post]
         # Новый формат (список постов)
         if isinstance(data, list):
+            posts = []
             for post in data:
+                # Пропускаем уже отправленные посты (старый формат)
+                if post.get("sent", False):
+                    continue
                 if isinstance(post.get("dispatch_at"), str):
-                    post["dispatch_at"] = datetime.fromisoformat(post["dispatch_at"])
-            return data
+                    dispatch_at = datetime.fromisoformat(post["dispatch_at"])
+                    # Если время без timezone, считаем его UTC
+                    if dispatch_at.tzinfo is None:
+                        dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
+                    post["dispatch_at"] = dispatch_at
+                elif isinstance(post.get("dispatch_at"), datetime):
+                    # Если время без timezone, считаем его UTC
+                    if post["dispatch_at"].tzinfo is None:
+                        post["dispatch_at"] = post["dispatch_at"].replace(tzinfo=UTC_TZ)
+                posts.append(post)
+            return posts
         return []
 
 
@@ -69,17 +90,21 @@ def main():
     if not posts:
         return
 
-    now = datetime.now()
+    now = datetime.now(UTC_TZ)  # Используем UTC время
     posts_to_keep = []
     updated = False
 
     for post in posts:
-        # Пропускаем уже отправленные посты (старый формат)
-        if post.get("sent"):
-            continue
+        dispatch_at = post["dispatch_at"]
+        # Убеждаемся, что время в UTC
+        if isinstance(dispatch_at, str):
+            dispatch_at = datetime.fromisoformat(dispatch_at)
+        if dispatch_at.tzinfo is None:
+            dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
+        post["dispatch_at"] = dispatch_at
 
         # Проверяем, наступило ли время отправки
-        if now >= post["dispatch_at"]:
+        if now >= dispatch_at:
             try:
                 bot.send_message(TARGET_CHAT_ID, post.get("message_text", "Привет"))
                 # Не добавляем пост в список для сохранения - удаляем его
