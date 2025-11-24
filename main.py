@@ -45,20 +45,34 @@ def _read_schedule():
         return []
     
     # Поддержка старого формата (один пост) - автоматическая миграция
+    # ВАЖНО: это должно происходить только один раз при миграции
     if isinstance(data, dict) and "dispatch_at" in data:
         # Пропускаем уже отправленные посты старого формата
         if data.get("sent", False):
             # Удаляем файл старого формата
-            os.remove(SCHEDULE_FILE)
+            try:
+                os.remove(SCHEDULE_FILE)
+            except:
+                pass
             return []
         
         # Мигрируем старый формат в новый
-        dispatch_at_str = data["dispatch_at"]
+        dispatch_at_str = data.get("dispatch_at")
+        if not dispatch_at_str:
+            try:
+                os.remove(SCHEDULE_FILE)
+            except:
+                pass
+            return []
+            
         try:
             dispatch_at = datetime.fromisoformat(dispatch_at_str)
         except (ValueError, TypeError):
             # Если не удается распарсить дату, удаляем файл
-            os.remove(SCHEDULE_FILE)
+            try:
+                os.remove(SCHEDULE_FILE)
+            except:
+                pass
             return []
         
         # Если время без timezone, считаем его UTC
@@ -66,30 +80,37 @@ def _read_schedule():
             dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
         
         post = {
-            "id": str(uuid.uuid4()),
+            "id": data.get("id", str(uuid.uuid4())),
             "dispatch_at": dispatch_at,
             "message_text": data.get("message_text", "Привет"),
         }
         
         # Сохраняем в новом формате и возвращаем список
+        # ВАЖНО: после миграции файл должен быть в новом формате
         _write_schedule([post])
         return [post]
     
     # Новый формат (список постов)
     if isinstance(data, list):
         posts = []
+        total_in_file = len(data)
+        skipped_count = 0
+        
         for post_data in data:
             # Пропускаем некорректные записи
             if not isinstance(post_data, dict):
+                skipped_count += 1
                 continue
                 
             # Пропускаем уже отправленные посты
             if post_data.get("sent", False):
+                skipped_count += 1
                 continue
             
             # Создаем новый словарь для поста, чтобы не модифицировать исходный
             dispatch_at_str = post_data.get("dispatch_at")
             if not dispatch_at_str:
+                skipped_count += 1
                 continue
                 
             try:
@@ -98,8 +119,10 @@ def _read_schedule():
                 elif isinstance(dispatch_at_str, datetime):
                     dispatch_at = dispatch_at_str
                 else:
+                    skipped_count += 1
                     continue  # Пропускаем посты с некорректным форматом времени
             except (ValueError, TypeError):
+                skipped_count += 1
                 continue  # Пропускаем посты с некорректной датой
             
             # Если время без timezone, считаем его UTC
@@ -113,6 +136,10 @@ def _read_schedule():
                 "message_text": post_data.get("message_text", "Привет"),
             }
             posts.append(post)
+        
+        # Логируем, если мы пропустили посты
+        if skipped_count > 0:
+            print(f"При чтении пропущено {skipped_count} из {total_in_file} постов")
         
         return posts
     
@@ -134,14 +161,25 @@ def _write_schedule(posts):
     
     # Создаем payload с правильной структурой
     payload = []
+    skipped_count = 0
+    
     for post in posts:
+        if not isinstance(post, dict):
+            skipped_count += 1
+            continue
+            
         # Извлекаем dispatch_at
         dispatch_at = post.get("dispatch_at")
+        if dispatch_at is None:
+            skipped_count += 1
+            continue
+            
         if isinstance(dispatch_at, datetime):
             dispatch_at_str = dispatch_at.isoformat()
         elif isinstance(dispatch_at, str):
             dispatch_at_str = dispatch_at
         else:
+            skipped_count += 1
             continue  # Пропускаем посты с некорректным форматом
         
         # Создаем запись для сохранения
@@ -152,17 +190,33 @@ def _write_schedule(posts):
         }
         payload.append(payload_item)
     
+    # Проверяем, что мы не потеряли посты
+    if skipped_count > 0:
+        print(f"Предупреждение: пропущено {skipped_count} постов при записи")
+    
+    if not payload:
+        # Если после обработки ничего не осталось, удаляем файл
+        if os.path.exists(SCHEDULE_FILE):
+            os.remove(SCHEDULE_FILE)
+        return
+    
     # Записываем в файл (создаем временный файл для атомарности записи)
     temp_file = SCHEDULE_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
-    
-    # Атомарно заменяем старый файл новым
-    if os.path.exists(temp_file):
-        if os.path.exists(SCHEDULE_FILE):
-            os.replace(temp_file, SCHEDULE_FILE)
-        else:
-            os.rename(temp_file, SCHEDULE_FILE)
+    try:
+        with open(temp_file, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+        
+        # Атомарно заменяем старый файл новым
+        if os.path.exists(temp_file):
+            if os.path.exists(SCHEDULE_FILE):
+                os.replace(temp_file, SCHEDULE_FILE)
+            else:
+                os.rename(temp_file, SCHEDULE_FILE)
+    except Exception as e:
+        print(f"Ошибка при записи файла расписания: {e}")
+        # Удаляем временный файл при ошибке
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
 
 @bot.message_handler(commands=["schedule"])
@@ -208,6 +262,9 @@ def handle_schedule(message: types.Message):
     if not isinstance(existing_posts, list):
         existing_posts = []
     
+    # Проверяем, что мы правильно прочитали существующие посты
+    existing_count = len(existing_posts)
+    
     # Создаем новый пост
     new_post = {
         "id": str(uuid.uuid4()),
@@ -215,9 +272,23 @@ def handle_schedule(message: types.Message):
         "message_text": message_text,
     }
     
-    # СОЗДАЕМ НОВЫЙ список, добавляя старые посты и новый
-    all_posts = list(existing_posts)  # Создаем копию существующего списка
-    all_posts.append(new_post)  # Добавляем новый пост
+    # СОЗДАЕМ НОВЫЙ список: сначала все существующие посты, потом новый
+    all_posts = []
+    # Добавляем все существующие посты (создаем новые объекты, чтобы не терять данные)
+    for existing_post in existing_posts:
+        all_posts.append({
+            "id": existing_post.get("id", str(uuid.uuid4())),
+            "dispatch_at": existing_post.get("dispatch_at"),
+            "message_text": existing_post.get("message_text", "Привет"),
+        })
+    
+    # Добавляем новый пост в конец списка
+    all_posts.append(new_post)
+    
+    # Проверяем, что список правильный перед сохранением
+    if len(all_posts) != existing_count + 1:
+        bot.reply_to(message, f"Ошибка: количество постов не совпадает. Было: {existing_count}, должно стать: {existing_count + 1}, получилось: {len(all_posts)}")
+        return
     
     # Сохраняем ВЕСЬ список постов
     _write_schedule(all_posts)
@@ -225,6 +296,13 @@ def handle_schedule(message: types.Message):
     # Проверяем, что данные сохранились правильно
     verify_posts = _read_schedule()
     verify_count = len(verify_posts) if verify_posts else 0
+    
+    if verify_count != len(all_posts):
+        bot.reply_to(
+            message,
+            f"⚠️ Внимание: было сохранено {len(all_posts)} постов, но прочитано {verify_count}. "
+            f"Проверьте файл schedule.json"
+        )
     
     # Подтверждаем добавление
     bot.reply_to(
