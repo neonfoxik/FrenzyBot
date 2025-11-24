@@ -89,9 +89,23 @@ def handle_schedule_status(message: types.Message):
     )
 
 
+FORWARDABLE_CONTENT_TYPES = [
+    "text",
+    "photo",
+    "video",
+    "animation",
+    "document",
+    "audio",
+    "voice",
+    "video_note",
+    "sticker",
+]
+
+
 @bot.message_handler(
     func=lambda message: message.forward_from_chat is not None
-    and str(message.from_user.id) == ADMIN_ID
+    and str(message.from_user.id) == ADMIN_ID,
+    content_types=FORWARDABLE_CONTENT_TYPES,
 )
 def handle_forwarded_chat(message: types.Message):
     chat = message.forward_from_chat
