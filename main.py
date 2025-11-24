@@ -89,20 +89,6 @@ def handle_schedule_status(message: types.Message):
     )
 
 
-@bot.message_handler(commands=["chat_id"])
-def handle_chat_id(message: types.Message):
-    if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "Эта команда доступна только администратору.")
-        return
-
-    chat_id = message.chat.id
-    bot.reply_to(message, f"ID текущего чата: {chat_id}")
-    bot.send_message(
-        ADMIN_ID_INT,
-        f"ID чата '{message.chat.title or message.chat.username or chat_id}': {chat_id}",
-    )
-
-
 @bot.message_handler(
     func=lambda message: message.forward_from_chat is not None
     and str(message.from_user.id) == ADMIN_ID
@@ -118,22 +104,10 @@ def handle_forwarded_chat(message: types.Message):
     )
 
 
-@bot.channel_post_handler(func=lambda message: message.text and "/chat_id" in message.text)
-def handle_channel_chat_id(message: types.Message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, f"ID этого канала: {chat_id}")
-    bot.send_message(
-        ADMIN_ID_INT,
-        f"ID канала '{message.chat.title or message.chat.username or chat_id}': {chat_id}",
-    )
-
-
 @bot.chat_join_request_handler()
 def approve_join_request(message):
     bot.approve_chat_join_request(message.chat.id, message.from_user.id)
 
 
 if __name__ == "__main__":
-    bot.infinity_polling(
-        allowed_updates=["chat_join_request", "message", "channel_post"]
-    )
+    bot.infinity_polling(allowed_updates=["chat_join_request", "message"])
