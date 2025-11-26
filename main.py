@@ -2,10 +2,12 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+import threading
 
 import telebot
 from dotenv import load_dotenv
 from telebot import types
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # Часовые пояса
 MSK_TZ = timezone(timedelta(hours=3))  # МСК = UTC+3
@@ -27,6 +29,12 @@ except ValueError as exc:
     raise ValueError("ADMIN_ID должен быть числом Telegram пользователя.") from exc
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# Временное хранилище (user_id: dict)
+schedule_step_buffer = {}
+schedule_step_lock = threading.Lock()
+
+SUPPORTED_MEDIA_TYPES = ("photo", "document", "video", "audio")
 
 
 def _read_schedule():
@@ -187,6 +195,7 @@ def _write_schedule(posts):
             "id": post.get("id", str(uuid.uuid4())),
             "dispatch_at": dispatch_at_str,
             "message_text": post.get("message_text", "Привет"),
+            "media": post.get("media", []),
         }
         payload.append(payload_item)
     
@@ -226,90 +235,159 @@ def handle_schedule(message: types.Message):
         return
 
     parts = message.text.split(maxsplit=2)
-    if len(parts) < 2:
+    if len(parts) < 3:
         bot.reply_to(
             message,
-            "Формат: /schedule YYYY-MM-DD HH:MM [текст сообщения]\n"
-            "Время указывается в МСК (Московское время)\n"
-            "Например: /schedule 2025-11-24 18:30 Привет всем!\n"
-            "Или: /schedule 2025-11-24 18:30",
+            "Формат: /schedule YYYY-MM-DD HH:MM\n"
+            "Сначала отправьте дату и время, например:/schedule 2025-12-01 16:30",
         )
         return
 
+    time_part = parts[1] + " " + parts[2]
     try:
-        # Парсим время как МСК
-        dispatch_at_msk = datetime.strptime(parts[1], "%Y-%m-%d %H:%M")
+        dispatch_at_msk = datetime.strptime(time_part, "%Y-%m-%d %H:%M")
         dispatch_at_msk = dispatch_at_msk.replace(tzinfo=MSK_TZ)
     except ValueError:
         bot.reply_to(message, "Неверный формат даты. Используй YYYY-MM-DD HH:MM.")
         return
 
-    # Конвертируем из МСК в UTC (вычитаем 3 часа)
     dispatch_at_utc = dispatch_at_msk.astimezone(UTC_TZ)
-    
-    # Проверяем, что время в будущем (используем UTC время сервера)
     now_utc = datetime.now(UTC_TZ)
     if dispatch_at_utc <= now_utc:
         bot.reply_to(message, "Время должно быть в будущем.")
         return
 
-    message_text = parts[2] if len(parts) > 2 else "Привет"
-    
-    # Читаем существующие посты - ВАЖНО: всегда читаем заново из файла
+    with schedule_step_lock:
+        schedule_step_buffer[message.from_user.id] = {
+            "dispatch_at": dispatch_at_utc,
+        }
+    bot.reply_to(
+        message,
+        f"ОК! Дата и время запланированы: {dispatch_at_msk.strftime('%Y-%m-%d %H:%M')} МСК\nТеперь отправьте текст сообщения, который надо запланировать.",
+    )
+    bot.register_next_step_handler(message, handle_schedule_message_text)
+
+
+def handle_schedule_message_text(message):
+    user_id = message.from_user.id
+    with schedule_step_lock:
+        data = schedule_step_buffer.pop(user_id, None)
+    if data is None:
+        bot.reply_to(message, "Ошибка: этап не найден. Начните с /schedule.")
+        return
+    message_text = message.text if message.text else "Привет"
+    dispatch_at_utc = data["dispatch_at"]
+    # Начинаем этап сбора файлов
+    with schedule_step_lock:
+        schedule_step_buffer[user_id] = {
+            "dispatch_at": dispatch_at_utc,
+            "message_text": message_text,
+            "media": [],
+            "active": True,  # помечаем, что этап добавления файлов открыт
+        }
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Продолжить", callback_data="done_media_upload"))
+    bot.reply_to(
+        message,
+        "Теперь вы можете отправить 1 или несколько файлов (фото, видео, документ, аудио).\nКогда закончите — нажмите 'Продолжить'.",
+        reply_markup=markup,
+    )
+
+# Исправить: сообщения с медиа добавляются только если этап активен, и нет next_step_handler после каждого файла
+@bot.message_handler(content_types=["photo", "document", "video", "audio"])
+def handle_media_during_schedule(message):
+    user_id = message.from_user.id
+    with schedule_step_lock:
+        data = schedule_step_buffer.get(user_id)
+        if not data or not data.get("active"):
+            return  # Игнор отсутсвия этапа
+        # добавляем файл
+        added = False
+        for attr in SUPPORTED_MEDIA_TYPES:
+            file = getattr(message, attr, None)
+            if file:
+                if isinstance(file, list):
+                    for photo in file:
+                        data["media"].append({"type": attr, "file_id": photo.file_id})
+                        added = True
+                else:
+                    data["media"].append({"type": attr, "file_id": file.file_id})
+                    added = True
+        schedule_step_buffer[user_id] = data
+    if added:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Продолжить", callback_data="done_media_upload"))
+        bot.reply_to(
+            message,
+            "Файл добавлен! Можете отправить ещё или нажмите 'Продолжить' для завершения.",
+            reply_markup=markup,
+        )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'done_media_upload')
+def schedule_inline_finish(call):
+    user_id = call.from_user.id
+    with schedule_step_lock:
+        data = schedule_step_buffer.pop(user_id, None)
+    if data is None or not data.get("active"):
+        bot.answer_callback_query(call.id, text="Этап не найден, начните сначала /schedule.")
+        return
+    data["active"] = False
+    finish_schedule_with_media(call.message, data)
+    bot.answer_callback_query(call.id, text="Пост сохранён!")
+
+def finish_schedule_with_media(message, data):
+    dispatch_at_utc = data["dispatch_at"]
+    message_text = data["message_text"]
+    media = data.get("media", [])
+    # Читаем существующие посты
     existing_posts = _read_schedule()
-    
-    # Убеждаемся, что existing_posts - это список
     if not isinstance(existing_posts, list):
         existing_posts = []
-    
-    # Проверяем, что мы правильно прочитали существующие посты
-    existing_count = len(existing_posts)
-    
-    # Создаем новый пост
+    # Дубликаты запрещаем если совпадает всё
+    duplicate = False
+    for existing_post in existing_posts:
+        d1 = existing_post.get("dispatch_at")
+        if isinstance(d1, str):
+            try:
+                d1 = datetime.fromisoformat(d1)
+            except Exception:
+                pass
+        if isinstance(d1, datetime):
+            d1 = d1.astimezone(UTC_TZ).isoformat()
+        d2 = dispatch_at_utc.astimezone(UTC_TZ).isoformat()
+        if (
+            d1 == d2 and
+            existing_post.get("message_text", "Привет") == message_text and
+            existing_post.get("media", []) == media
+        ):
+            duplicate = True
+            break
+    if duplicate:
+        bot.reply_to(message, "Пост с таким содержимым уже есть!")
+        return
+    # Добавляем пост
     new_post = {
         "id": str(uuid.uuid4()),
-        "dispatch_at": dispatch_at_utc,  # Сохраняем в UTC
+        "dispatch_at": dispatch_at_utc,
         "message_text": message_text,
+        "media": media or [],
     }
-    
-    # СОЗДАЕМ НОВЫЙ список: сначала все существующие посты, потом новый
-    all_posts = []
-    # Добавляем все существующие посты (создаем новые объекты, чтобы не терять данные)
-    for existing_post in existing_posts:
-        all_posts.append({
+    all_posts = [
+        {
             "id": existing_post.get("id", str(uuid.uuid4())),
             "dispatch_at": existing_post.get("dispatch_at"),
             "message_text": existing_post.get("message_text", "Привет"),
-        })
-    
-    # Добавляем новый пост в конец списка
+            "media": existing_post.get("media", []),
+        }
+        for existing_post in existing_posts
+    ]
     all_posts.append(new_post)
-    
-    # Проверяем, что список правильный перед сохранением
-    if len(all_posts) != existing_count + 1:
-        bot.reply_to(message, f"Ошибка: количество постов не совпадает. Было: {existing_count}, должно стать: {existing_count + 1}, получилось: {len(all_posts)}")
-        return
-    
-    # Сохраняем ВЕСЬ список постов
     _write_schedule(all_posts)
-    
-    # Проверяем, что данные сохранились правильно
     verify_posts = _read_schedule()
     verify_count = len(verify_posts) if verify_posts else 0
-    
-    if verify_count != len(all_posts):
-        bot.reply_to(
-            message,
-            f"⚠️ Внимание: было сохранено {len(all_posts)} постов, но прочитано {verify_count}. "
-            f"Проверьте файл schedule.json"
-        )
-    
-    # Подтверждаем добавление
     bot.reply_to(
-        message, 
-        f"Пост запланирован на {dispatch_at_msk.strftime('%Y-%m-%d %H:%M')} МСК.\n"
-        f"Текст: {message_text}\n"
-        f"Всего запланировано постов: {verify_count}"
+        message,
+        f"Пост запланирован на {dispatch_at_utc.astimezone(MSK_TZ).strftime('%Y-%m-%d %H:%M')} МСК!\nВсего запланировано: {verify_count}\nФайлов прикреплено: {len(media)}",
     )
 
 
@@ -370,4 +448,4 @@ def approve_join_request(message):
 
 
 if __name__ == "__main__":
-    bot.infinity_polling(allowed_updates=["chat_join_request", "message"])
+    bot.infinity_polling(allowed_updates=["message", "callback_query", "chat_join_request"])

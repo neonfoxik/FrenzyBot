@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import telebot
 from dotenv import load_dotenv
+import time
 
 UTC_TZ = timezone.utc  # UTC
 
@@ -50,9 +51,10 @@ def _read_schedule():
         if dispatch_at.tzinfo is None:
             dispatch_at = dispatch_at.replace(tzinfo=UTC_TZ)
         post = {
-            "id": str(uuid.uuid4()),
+            "id": data.get("id", str(uuid.uuid4())),
             "dispatch_at": dispatch_at,
             "message_text": data.get("message_text", "Привет"),
+            "media": data.get("media", []),  # Вот это добавлено
         }
         return [post]
     
@@ -92,6 +94,7 @@ def _read_schedule():
                 "id": post_data.get("id", str(uuid.uuid4())),
                 "dispatch_at": dispatch_at,
                 "message_text": post_data.get("message_text", "Привет"),
+                "media": post_data.get("media", []),
             }
             posts.append(post)
         return posts
@@ -128,6 +131,7 @@ def _write_schedule(posts):
             "id": post.get("id", str(uuid.uuid4())),
             "dispatch_at": dispatch_at_str,
             "message_text": post.get("message_text", "Привет"),
+            "media": post.get("media", []),
         }
         payload.append(payload_item)
     
@@ -165,12 +169,49 @@ def main():
         # Проверяем, наступило ли время отправки
         if now >= dispatch_at:
             try:
-                bot.send_message(TARGET_CHAT_ID, post.get("message_text", "Привет"))
-                # Не добавляем пост в список для сохранения - удаляем его
+                media = post.get("media", [])
+                text = post.get("message_text", "Привет")
+                if media:
+                    # group of photos or videos
+                    media_group = []
+                    has_text = False
+                    for idx, m in enumerate(media):
+                        if m["type"] == "photo":
+                            input_media = telebot.types.InputMediaPhoto(m["file_id"], caption=text if not has_text else None)
+                            has_text = True
+                        elif m["type"] == "video":
+                            input_media = telebot.types.InputMediaVideo(m["file_id"], caption=text if not has_text else None)
+                            has_text = True
+                        elif m["type"] == "document":
+                            input_media = telebot.types.InputMediaDocument(m["file_id"], caption=text if not has_text else None)
+                            has_text = True
+                        elif m["type"] == "audio":
+                            input_media = telebot.types.InputMediaAudio(m["file_id"], caption=text if not has_text else None)
+                            has_text = True
+                        else:
+                            continue
+                        media_group.append(input_media)
+                    if len(media_group) > 1:
+                        bot.send_media_group(TARGET_CHAT_ID, media_group)
+                    elif len(media_group) == 1:
+                        if media[0]["type"] == "photo":
+                            bot.send_photo(TARGET_CHAT_ID, media[0]["file_id"], caption=text)
+                        elif media[0]["type"] == "document":
+                            bot.send_document(TARGET_CHAT_ID, media[0]["file_id"], caption=text)
+                        elif media[0]["type"] == "video":
+                            bot.send_video(TARGET_CHAT_ID, media[0]["file_id"], caption=text)
+                        elif media[0]["type"] == "audio":
+                            bot.send_audio(TARGET_CHAT_ID, media[0]["file_id"], caption=text)
+                        else:
+                            bot.send_message(TARGET_CHAT_ID, text)
+                    else:
+                        bot.send_message(TARGET_CHAT_ID, text)
+                    time.sleep(1) # чтобы Telegram не ругался на флуд
+                else:
+                    bot.send_message(TARGET_CHAT_ID, text)
                 updated = True
             except Exception as e:
                 print(f"Ошибка при отправке поста {post.get('id')}: {e}")
-                # В случае ошибки оставляем пост для повторной попытки
                 posts_to_keep.append(post)
         else:
             # Пост ещё не готов к отправке - сохраняем его
